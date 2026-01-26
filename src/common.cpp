@@ -67,8 +67,8 @@ MonocularMode::MonocularMode() :Node("mono_node_cpp")
     
     subexperimentconfigName = "/mono_py_driver/experiment_settings"; // topic that sends out some configuration parameters to the cpp ndoe
     pubconfigackName = "/mono_py_driver/exp_settings_ack"; // send an acknowledgement to the python node
-    subImgMsgName = "/mono_py_driver/img_msg"; // topic to receive RGB image messages
-    subTimestepMsgName = "/mono_py_driver/timestep_msg"; // topic to receive RGB image messages
+   // subImgMsgName = "/mono_py_driver/img_msg"; // topic to receive RGB image messages
+   // subTimestepMsgName = "/mono_py_driver/timestep_msg"; // topic to receive RGB image messages
 
     //* subscribe to python node to receive settings
     expConfig_subscription_ = this->create_subscription<std_msgs::msg::String>(subexperimentconfigName, 1, std::bind(&MonocularMode::experimentSetting_callback, this, _1));
@@ -77,12 +77,23 @@ MonocularMode::MonocularMode() :Node("mono_node_cpp")
     configAck_publisher_ = this->create_publisher<std_msgs::msg::String>(pubconfigackName, 10);
 
     //* subscrbite to the image messages coming from the Python driver node
-    subImgMsg_subscription_= this->create_subscription<sensor_msgs::msg::Image>(subImgMsgName, 1, std::bind(&MonocularMode::Img_callback, this, _1));
+   // subImgMsg_subscription_= this->create_subscription<sensor_msgs::msg::Image>(subImgMsgName, 1, std::bind(&MonocularMode::Img_callback, this, _1));
 
     //* subscribe to receive the timestep
-    subTimestepMsg_subscription_= this->create_subscription<std_msgs::msg::Float64>(subTimestepMsgName, 1, std::bind(&MonocularMode::Timestep_callback, this, _1));
+   // subTimestepMsg_subscription_= this->create_subscription<std_msgs::msg::Float64>(subTimestepMsgName, 1, std::bind(&MonocularMode::Timestep_callback, this, _1));
 
-    
+    image_subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
+    "/image_raw",
+    rclcpp::SensorDataQoS(),
+    std::bind(&MonocularMode::Img_callback, this, std::placeholders::_1));
+
+    camera_info_subscription_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+    "/camera_info",
+    rclcpp::SensorDataQoS(),
+    std::bind(&MonocularMode::CameraInfo_callback, this, std::placeholders::_1));
+	std::string config = "USB";  
+ 	initializeVSLAM(config);
+
     RCLCPP_INFO(this->get_logger(), "Waiting to finish handshake ......");
     
 }
@@ -154,9 +165,19 @@ void MonocularMode::Timestep_callback(const std_msgs::msg::Float64& time_msg){
     timeStep = time_msg.data;
 }
 
+void MonocularMode::CameraInfo_callback(const sensor_msgs::msg::CameraInfo& info) {
+    // Optional: store intrinsics or ignore if YAML already provides them
+    RCLCPP_INFO(this->get_logger(), "Received CameraInfo message");
+}
+
 //* Callback to process image message and run SLAM node
 void MonocularMode::Img_callback(const sensor_msgs::msg::Image& msg)
 {
+    if (!pAgent) {
+   	 RCLCPP_WARN(this->get_logger(), "Img_callback received but SLAM not initialized yet");
+         return;
+    }
+
     // Initialize
     cv_bridge::CvImagePtr cv_ptr; //* Does not create a copy, memory efficient
     
@@ -164,7 +185,7 @@ void MonocularMode::Img_callback(const sensor_msgs::msg::Image& msg)
     try
     {
         //cv::Mat im =  cv_bridge::toCvShare(msg.img, msg)->image;
-        cv_ptr = cv_bridge::toCvCopy(msg); // Local scope
+        cv_ptr = cv_bridge::toCvCopy(msg,"rgb8"); // Local scope
         
         // DEBUGGING, Show image
         // Update GUI Window
@@ -176,13 +197,26 @@ void MonocularMode::Img_callback(const sensor_msgs::msg::Image& msg)
         RCLCPP_ERROR(this->get_logger(),"Error reading image");
         return;
     }
+
+	cv::Mat gray;
+	cv::cvtColor(cv_ptr->image, gray, cv::COLOR_RGB2GRAY);
+	double meanVal = cv::mean(gray)[0];
+	RCLCPP_INFO(this->get_logger(),
+            "Image received: %dx%d mean=%.2f",
+            gray.cols, gray.rows, meanVal);
     
     // std::cout<<std::fixed<<"Timestep: "<<timeStep<<std::endl; // Debug
     
     //* Perform all ORB-SLAM3 operations in Monocular mode
     //! Pose with respect to the camera coordinate frame not the world coordinate frame
-    Sophus::SE3f Tcw = pAgent->TrackMonocular(cv_ptr->image, timeStep); 
-    
+   // Sophus::SE3f Tcw = pAgent->TrackMonocular(cv_ptr->image, timeStep); 
+    double t = rclcpp::Time(msg.header.stamp).seconds();
+	Sophus::SE3f Tcw = pAgent->TrackMonocular(gray, t);
+
+    RCLCPP_INFO(this->get_logger(), "Tracking state: %d, keypoints: %zu",
+            pAgent->GetTrackingState(),
+            pAgent->GetTrackedKeyPoints().size());
+
     //* An example of what can be done after the pose w.r.t camera coordinate frame is computed by ORB SLAM3
     //Sophus::SE3f Twc = Tcw.inverse(); //* Pose with respect to global image coordinate, reserved for future use
 
